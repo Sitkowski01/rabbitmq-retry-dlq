@@ -1,0 +1,22 @@
+{
+  "name": "rabbitmq-retry-dlq",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RabbitMQ w Dockerze: kolejka, konsument, ponawianie z narastającym opóźnieniem i dead letter queue.",
+  "type": "module",
+  "scripts": {
+    "up": "docker compose up -d",
+    "down": "docker compose down -v",
+    "build": "tsc",
+    "consumer": "tsc && node dist/consumer.js",
+    "producer": "tsc && node dist/producer.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.4"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0"
+  }
+}
