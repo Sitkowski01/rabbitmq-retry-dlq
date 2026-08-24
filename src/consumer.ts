@@ -1,99 +1,151 @@
-import amqp from "amqplib";
+import type { ConfirmChannel, ConsumeMessage } from "amqplib";
+import { connectWithRetry, log, pilnujPolaczenia } from "./amqp.js";
 import {
   assertTopology,
   EXCHANGE_DLX,
   EXCHANGE_RETRY,
-  MAX_ATTEMPTS,
+  MAX_RETRIES,
   QUEUE_MAIN,
   RETRY_DELAYS_MS,
   ROUTING_KEY,
   retryRoutingKey,
 } from "./topology.js";
-import { PermanentError, processOrder, type Order } from "./orders.js";
-
-const URL = process.env.AMQP_URL ?? "amqp://guest:guest@localhost:5672";
-
-const ts = () => new Date().toISOString().slice(11, 19);
-const log = (icon: string, msg: string) => console.log(`${ts()} ${icon} ${msg}`);
+import { parseOrder, PermanentError, processOrder } from "./orders.js";
 
 async function main() {
-  const conn = await amqp.connect(URL);
-  const ch = await conn.createChannel();
-  await assertTopology(ch);
+  const conn = await connectWithRetry();
+  pilnujPolaczenia(conn);
 
-  // Bez tego jeden konsument zassałby całą kolejkę do pamięci i ponowienia
-  // przestałyby cokolwiek znaczyć.
+  // Confirm channel także po stronie konsumenta: komunikat przekazywany na retry
+  // albo na DLQ musi być potwierdzony przez brokera ZANIM potwierdzimy oryginał.
+  // Bez tego awaria brokera w oknie zapisu gubiła komunikat bezpowrotnie.
+  const ch: ConfirmChannel = await conn.createConfirmChannel();
+  ch.on("error", (e) => log("⚠️ ", `błąd kanału: ${e.message}`));
+
+  await assertTopology(ch);
   await ch.prefetch(1);
 
-  log("👂", `nasłuchuję na ${QUEUE_MAIN} (Ctrl+C kończy)`);
-
-  await ch.consume(QUEUE_MAIN, async (msg) => {
-    if (!msg) return;
-
-    const attempt = Number(msg.properties.headers?.["x-attempt"] ?? 0) + 1;
-    let order: Order;
-
-    try {
-      order = JSON.parse(msg.content.toString()) as Order;
-    } catch {
-      // Nieparsowalny komunikat nigdy nie zacznie się parsować — retry nie ma sensu.
-      log("☠️ ", "komunikat nie jest poprawnym JSON-em → prosto na DLQ");
-      ch.publish(EXCHANGE_DLX, ROUTING_KEY, msg.content, {
-        persistent: true,
-        headers: { ...msg.properties.headers, "x-death-reason": "malformed-json" },
-      });
-      ch.ack(msg);
-      return;
-    }
-
-    try {
-      const result = await processOrder(order);
-      log("✅", `${result}  [próba ${attempt}]`);
-      ch.ack(msg);
-      return;
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      const permanent = err instanceof PermanentError;
-
-      // Błąd trwały nie zmieni się od powtórzenia — nie marnujemy na niego trzech podejść.
-      if (permanent || attempt >= MAX_ATTEMPTS) {
-        const why = permanent
-          ? "błąd trwały"
-          : `wyczerpane ${MAX_ATTEMPTS} próby`;
-        log("☠️ ", `${order.id}: ${reason} → DLQ (${why})`);
-        ch.publish(EXCHANGE_DLX, ROUTING_KEY, msg.content, {
+  /** Publikuje i czeka na potwierdzenie brokera. */
+  const publishConfirmed = (
+    exchange: string,
+    rk: string,
+    msg: ConsumeMessage,
+    headers: Record<string, unknown>,
+  ) =>
+    new Promise<void>((resolve, reject) => {
+      ch.publish(
+        exchange,
+        rk,
+        msg.content,
+        {
           persistent: true,
-          headers: {
-            ...msg.properties.headers,
-            "x-attempt": attempt,
-            "x-death-reason": permanent ? "permanent-error" : "max-attempts-exceeded",
-            "x-last-error": reason,
-          },
-        });
-        ch.ack(msg);
+          // messageId i contentType niosą identyfikator nadany przez producenta —
+          // bez nich wpis na DLQ jest anonimowy i człowiek nie wie, czego dotyczy.
+          messageId: msg.properties.messageId,
+          contentType: msg.properties.contentType,
+          headers,
+        },
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
+
+  const naDlq = async (msg: ConsumeMessage, powod: string, opis: string, proba: number) => {
+    await publishConfirmed(EXCHANGE_DLX, ROUTING_KEY, msg, {
+      ...msg.properties.headers,
+      "x-attempt": proba,
+      "x-death-reason": powod,
+      "x-last-error": opis,
+    });
+    ch.ack(msg);
+  };
+
+  let wTrakcie = false;
+  let zamykanie = false;
+  let consumerTag = "";
+
+  log("👂", `nasłuchuję na ${QUEUE_MAIN} · ponowienia: ${RETRY_DELAYS_MS.map((d) => d / 1000 + "s").join(" → ")} · Ctrl+C kończy`);
+
+  const { consumerTag: tag } = await ch.consume(QUEUE_MAIN, async (msg) => {
+    if (!msg) return;
+    wTrakcie = true;
+    try {
+      // Nagłówek mógł przyjść z zewnątrz w dowolnej postaci. Bez tej ochrony
+      // niepoprawna wartość dawała NaN, a publikacja szła na `retry.NaN` —
+      // klucz bez powiązania, więc broker po cichu wyrzucał komunikat.
+      const surowa = Number(msg.properties.headers?.["x-attempt"]);
+      const proba = (Number.isFinite(surowa) && surowa >= 0 ? Math.floor(surowa) : 0) + 1;
+
+      let order;
+      try {
+        order = parseOrder(JSON.parse(msg.content.toString()));
+      } catch (e) {
+        // Zły JSON albo zły kształt nigdy się nie naprawi — retry nie ma sensu.
+        const opis = e instanceof Error ? e.message : String(e);
+        log("☠️ ", `komunikat odrzucony przy walidacji (${opis}) → DLQ`);
+        await naDlq(msg, "invalid-message", opis, proba);
         return;
       }
 
-      const delay = RETRY_DELAYS_MS[attempt - 1];
-      log(
-        "🔁",
-        `${order.id}: ${reason} → ponowienie za ${delay / 1000}s  [próba ${attempt} z ${MAX_ATTEMPTS}]`,
-      );
-      ch.publish(EXCHANGE_RETRY, retryRoutingKey(attempt), msg.content, {
-        persistent: true,
-        headers: { ...msg.properties.headers, "x-attempt": attempt, "x-last-error": reason },
-      });
-      // ack, bo odpowiedzialność za komunikat przejmuje kolejka opóźniająca.
-      // nack z requeue wróciłby tu natychmiast i zrobił pętlę bez opóźnienia.
-      ch.ack(msg);
+      try {
+        log("✅", `${await processOrder(order)}  [podejście ${proba}]`);
+        ch.ack(msg);
+      } catch (err) {
+        const opis = err instanceof Error ? err.message : String(err);
+
+        if (err instanceof PermanentError) {
+          log("☠️ ", `${order.id}: ${opis} → DLQ (błąd trwały)`);
+          await naDlq(msg, "permanent-error", opis, proba);
+          return;
+        }
+        if (proba > MAX_RETRIES) {
+          log("☠️ ", `${order.id}: ${opis} → DLQ (wyczerpane ${MAX_RETRIES} ponowienia)`);
+          await naDlq(msg, "max-retries-exceeded", opis, proba);
+          return;
+        }
+
+        const delay = RETRY_DELAYS_MS[proba - 1];
+        log("🔁", `${order.id}: ${opis} → ponowienie za ${delay / 1000}s  [${proba} z ${MAX_RETRIES}]`);
+        await publishConfirmed(EXCHANGE_RETRY, retryRoutingKey(proba), msg, {
+          ...msg.properties.headers,
+          "x-attempt": proba,
+          "x-last-error": opis,
+        });
+        // ack dopiero po potwierdzeniu — odpowiedzialność przejęła kolejka opóźniająca.
+        // nack z requeue wróciłby tu natychmiast i zrobił pętlę bez opóźnienia.
+        ch.ack(msg);
+      }
+    } catch (e) {
+      log("⚠️ ", `nieoczekiwany błąd obsługi: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      wTrakcie = false;
+      if (zamykanie) void domknij();
     }
   });
+  consumerTag = tag;
 
-  process.on("SIGINT", async () => {
-    log("👋", "zamykam połączenie");
-    await ch.close();
-    await conn.close();
+  const domknij = async () => {
+    try {
+      await ch.close();
+      await conn.close();
+    } catch {
+      /* kanał mógł już być zamknięty */
+    }
     process.exit(0);
+  };
+
+  // Najpierw anulujemy subskrypcję, potem czekamy na komunikat w locie.
+  // Wcześniejsze zamykanie kanału powodowało ack na zamkniętym kanale
+  // i wywrotkę na nieobsłużonym odrzuceniu.
+  process.on("SIGINT", async () => {
+    if (zamykanie) return;
+    zamykanie = true;
+    log("👋", "kończę — anuluję subskrypcję i czekam na komunikat w locie");
+    try {
+      await ch.cancel(consumerTag);
+    } catch {
+      /* nic */
+    }
+    if (!wTrakcie) await domknij();
   });
 }
 

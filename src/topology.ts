@@ -12,21 +12,21 @@ import type { Channel } from "amqplib";
  *                        ┌──────────────────────┐
  *                        │  orders.process      │◄──── konsument
  *                        └──────────┬───────────┘
- *                                   │ błąd → publikacja na orders.retry
+ *                                   │ błąd przejściowy
  *                                   ▼
- *                        ┌──────────────────────┐
- *                        │  orders.retry (direct)│
- *                        └──┬─────────┬─────────┬┘
- *                    rk:1   │    rk:2 │   rk:3  │
- *                           ▼         ▼         ▼
- *                    retry.5s     retry.15s   retry.60s
- *                    (x-message-ttl + dead-letter z powrotem na `orders`)
- *                           └─────────┴─────────┘
+ *                        ┌───────────────────────┐
+ *                        │  orders.retry (direct) │
+ *                        └──┬─────────┬──────────┬┘
+ *                    rk:1   │   rk:2  │   rk:3   │
+ *                           ▼         ▼          ▼
+ *                     retry.5s    retry.15s   retry.60s
+ *                     x-message-ttl + dead-letter z powrotem na `orders`
+ *                           └─────────┴──────────┘
  *                                   │ po wygaśnięciu TTL
  *                                   ▼
  *                            znów orders.process
  *
- *   po MAX_ATTEMPTS ──► orders.dlx ──► orders.dlq  (parking, bez konsumenta)
+ *   po wyczerpaniu ponowień ──► orders.dlx ──► orders.dlq (parking, bez konsumenta)
  *
  * Dlaczego TTL, a nie `sleep` w konsumencie: opóźnienie trzyma broker, więc konsument
  * nie blokuje wątku ani prefetch slota, a ponowienia przeżywają restart procesu.
@@ -41,9 +41,20 @@ export const QUEUE_DLQ = "orders.dlq";
 
 export const ROUTING_KEY = "order.created";
 
-/** Kolejne progi ponawiania. Indeks = numer próby - 1. */
-export const RETRY_DELAYS_MS = [5_000, 15_000, 60_000];
-export const MAX_ATTEMPTS = RETRY_DELAYS_MS.length;
+/**
+ * Kolejne progi ponawiania. Indeks = numer nieudanej próby - 1.
+ * Nadpisywalne przez RETRY_DELAYS (ms, po przecinku) — testy nie muszą czekać minuty.
+ */
+export const RETRY_DELAYS_MS: number[] = (process.env.RETRY_DELAYS ?? "5000,15000,60000")
+  .split(",")
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0);
+
+/**
+ * Ile razy PONAWIAMY. Pierwsze wykonanie nie jest ponowieniem, więc komunikat
+ * dostaje w sumie MAX_RETRIES + 1 podejść, zanim trafi na DLQ.
+ */
+export const MAX_RETRIES = RETRY_DELAYS_MS.length;
 
 export const retryQueueName = (delayMs: number) => `orders.retry.${delayMs / 1000}s`;
 export const retryRoutingKey = (attempt: number) => `retry.${attempt}`;
