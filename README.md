@@ -143,7 +143,8 @@ docker-compose.yml
 
 ## Co poprawiłem po przeglądzie kodu
 
-Pierwsza wersja przechodziła testy, ale przegląd znalazł osiem rzeczy — dwie poważne:
+Pierwszą wersję, która przechodziła testy, przepuściłem przez przegląd kodu
+(Claude Code). Wyszło osiem rzeczy, dwie poważne:
 
 - **Trzeci próg ponawiania był martwy.** Warunek `attempt >= MAX_ATTEMPTS` odsyłał
   komunikat na DLQ po dwóch ponowieniach, więc kolejka `orders.retry.60s` nigdy nie
@@ -154,13 +155,19 @@ Pierwsza wersja przechodziła testy, ale przegląd znalazł osiem rzeczy — dwi
   logowany jako sukces i potwierdzany. Teraz jest `parseOrder` z walidacją i `never`
   w gałęzi domyślnej, żeby kompilator pilnował kompletności.
 
-Reszta: przekazanie na retry idzie przez **confirm channel** (wcześniej kanał zwykły —
-awaria brokera gubiła komunikat), **SIGINT** anuluje subskrypcję i czeka na komunikat
-w locie zamiast zamykać kanał pod nim, doszły **nasłuchy `error`/`close`** (restart brokera
-ubijał proces bez śladu), **NaN w `x-attempt`** nie kieruje już na nieistniejący klucz
-`retry.NaN`, połączenie **ponawia się przy starcie** (broker w Dockerze wstaje wolniej niż
-`docker compose up` wraca), a przekazywany komunikat **zachowuje `messageId` i `contentType`**,
-żeby wpis na DLQ dało się powiązać z zamówieniem.
+Pozostałe sześć:
+
+- **Przekazanie na kolejkę opóźniającą idzie przez confirm channel.** Wcześniej szło
+  zwykłym kanałem — awaria brokera w tym oknie gubiła komunikat bez śladu.
+- **SIGINT anuluje subskrypcję i czeka na komunikat w locie**, zamiast zamykać kanał
+  pod trwającym przetwarzaniem.
+- **Doszły nasłuchy `error` i `close` na połączeniu.** Restart brokera ubijał proces,
+  nie zostawiając niczego w logu.
+- **`NaN` w nagłówku `x-attempt` nie kieruje już na nieistniejący klucz `retry.NaN`.**
+- **Połączenie ponawia się przy starcie.** Broker w Dockerze wstaje wolniej, niż
+  `docker compose up` wraca do promptu.
+- **Przekazywany komunikat zachowuje `messageId` i `contentType`**, więc wpis na DLQ
+  da się powiązać z konkretnym zamówieniem.
 
 ## Dwie rzeczy, które w prawdziwym systemie wyglądałyby inaczej
 
