@@ -183,7 +183,7 @@ wykonaniu — inaczej trzykrotne podejście do płatności obciąży klienta trz
 
 ## Testy
 
-31 testów na wbudowanym runnerze Node — bez brokera, bez dodatkowych zależności:
+35 testów na wbudowanym runnerze Node — bez brokera, bez dodatkowych zależności:
 
 ```bash
 npm test
@@ -197,3 +197,5 @@ npm test
   progowi i odsyła na główną wymianę, że DLQ nie ma TTL (parking, nie przelotka)
   i że żadna kolejka nie odsyła sama do siebie, co dałoby pętlę bez konsumenta
 - **idempotentność** `assertTopology` — dwa wywołania dają ten sam zestaw
+- **konfiguracja progów** — błędna wartość `RETRY_DELAYS` przerywa start z czytelnym
+  komunikatem, zamiast po cichu zostawiać zero ponowień

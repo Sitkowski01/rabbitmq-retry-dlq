@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   assertTopology,
+  odczytajProgi,
   EXCHANGE,
   EXCHANGE_DLX,
   EXCHANGE_RETRY,
@@ -35,6 +36,32 @@ function kanalAtrapa() {
 
   return { ch, exchanges, queues, bindings };
 }
+
+describe("odczytajProgi", () => {
+  it("brak zmiennej środowiskowej daje progi domyślne", () => {
+    assert.deepEqual(odczytajProgi(undefined), [5000, 15000, 60000]);
+  });
+
+  it("czyta własne progi", () => {
+    assert.deepEqual(odczytajProgi("100, 200, 300"), [100, 200, 300]);
+  });
+
+  it("pomija pojedyncze śmieci, zostawiając poprawne wartości", () => {
+    assert.deepEqual(odczytajProgi("100, abc, 300"), [100, 300]);
+  });
+
+  it("wywraca się, gdy nie zostanie ani jedna poprawna liczba", () => {
+    // Sedno poprawki: wczesniej pusta lista dawala MAX_RETRIES = 0, wiec kazdy
+    // blad przejsciowy szedl OD RAZU na DLQ — bez wyjatku i bez sladu w logach.
+    for (const zle of ["abc", "", "0", "-5", "   "]) {
+      assert.throws(
+        () => odczytajProgi(zle),
+        /nie zawiera ani jednej dodatniej liczby/,
+        `powinno odrzucic: "${zle}"`,
+      );
+    }
+  });
+});
 
 describe("progi ponawiania", () => {
   it("domyślnie trzy progi: 5s, 15s, 60s", () => {

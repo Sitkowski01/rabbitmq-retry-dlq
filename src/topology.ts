@@ -45,10 +45,36 @@ export const ROUTING_KEY = "order.created";
  * Kolejne progi ponawiania. Indeks = numer nieudanej próby - 1.
  * Nadpisywalne przez RETRY_DELAYS (ms, po przecinku) — testy nie muszą czekać minuty.
  */
-export const RETRY_DELAYS_MS: number[] = (process.env.RETRY_DELAYS ?? "5000,15000,60000")
-  .split(",")
-  .map((s) => Number(s.trim()))
-  .filter((n) => Number.isFinite(n) && n > 0);
+const DOMYSLNE_PROGI = [5000, 15000, 60000];
+
+/**
+ * Czyta progi ponawiania ze zmiennej środowiskowej.
+ *
+ * Pusty wynik jest traktowany jako błąd konfiguracji, a nie jako „zero ponowień".
+ * Bez tego literówka w `RETRY_DELAYS` dawała pustą listę, `MAX_RETRIES` schodziło
+ * do zera i **każdy błąd przejściowy leciał od razu na DLQ** — po cichu, bo nic
+ * się nie wywracało i logi wyglądały normalnie.
+ */
+export function odczytajProgi(surowe: string | undefined): number[] {
+  if (surowe === undefined) return DOMYSLNE_PROGI;
+
+  const progi = surowe
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  if (progi.length === 0) {
+    throw new Error(
+      `RETRY_DELAYS="${surowe}" nie zawiera ani jednej dodatniej liczby milisekund. ` +
+        `Popraw wartość albo usuń zmienną, żeby użyć domyślnych progów ` +
+        `(${DOMYSLNE_PROGI.join(", ")}).`,
+    );
+  }
+
+  return progi;
+}
+
+export const RETRY_DELAYS_MS: number[] = odczytajProgi(process.env.RETRY_DELAYS);
 
 /**
  * Ile razy PONAWIAMY. Pierwsze wykonanie nie jest ponowieniem, więc komunikat
