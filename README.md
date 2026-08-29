@@ -1,5 +1,7 @@
 # RabbitMQ: kolejka, konsument, ponawianie i dead letter queue
 
+[![CI](https://github.com/Sitkowski01/rabbitmq-retry-dlq/actions/workflows/ci.yml/badge.svg)](https://github.com/Sitkowski01/rabbitmq-retry-dlq/actions/workflows/ci.yml)
+
 Mały, działający przykład wzorca, który spina cztery rzeczy: **kolejkę, konsumenta,
 ponawianie z narastającym opóźnieniem i obsługę komunikatów, których nie da się przetworzyć.**
 
@@ -178,3 +180,20 @@ zamówienia — nagłówek da się zgubić przy przepakowaniu.
 **Konsument nie jest idempotentny.** `ORD-1002` przechodzi za trzecim razem, bo licznik
 awarii jest w pamięci procesu. W produkcji ponowienie musi być bezpieczne przy wielokrotnym
 wykonaniu — inaczej trzykrotne podejście do płatności obciąży klienta trzy razy.
+
+## Testy
+
+31 testów na wbudowanym runnerze Node — bez brokera, bez dodatkowych zależności:
+
+```bash
+npm test
+```
+
+- **walidacja komunikatu** — jedenaście kształtów, które muszą polecieć błędem trwałym
+  prosto na DLQ, zamiast kręcić się przez trzy ponowienia
+- **logika ponowień** — że `flaky` przechodzi za trzecim podejściem, `stubborn` nigdy,
+  a licznik podejść jest osobny dla każdego identyfikatora
+- **topologia** — na kanale-atrapie: że każda kolejka opóźniająca ma TTL równy swojemu
+  progowi i odsyła na główną wymianę, że DLQ nie ma TTL (parking, nie przelotka)
+  i że żadna kolejka nie odsyła sama do siebie, co dałoby pętlę bez konsumenta
+- **idempotentność** `assertTopology` — dwa wywołania dają ten sam zestaw

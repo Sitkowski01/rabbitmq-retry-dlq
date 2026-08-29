@@ -9,7 +9,9 @@
     "down": "docker compose down -v",
     "build": "tsc",
     "consumer": "tsc && node dist/consumer.js",
-    "producer": "tsc && node dist/producer.js"
+    "producer": "tsc && node dist/producer.js",
+    "test": "tsc && node --test dist/*.test.js",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "amqplib": "^0.10.4"
